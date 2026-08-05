@@ -1,6 +1,6 @@
 --[[
-	PhysicalAxis Hub - Versión Final Completa
-	Descripción: Hub completo con lista de jugadores mejorada, telequinesis y más
+	PhysicalAxis Hub - Versión Final Corregida
+	Descripción: Hub completo con telekinesis funcional, lock-on de cámara y más
 ]]
 
 -- Servicios
@@ -14,7 +14,6 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local Lighting = game:GetService("Lighting")
 local StarterGui = game:GetService("StarterGui")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local Terrain = Workspace:FindFirstChildOfClass("Terrain")
@@ -40,10 +39,12 @@ local isTelekinesisEnabled = false
 local physicsConnection = nil
 local espConnections = {}
 local rejoinConnection = nil
-local telekinesisConnection = nil
-local fixedCameraTarget = nil -- Jugador al que se fija la cámara
-local heldObject = nil -- Objeto sostenido por telequinesis
-local mouseTarget = nil -- Objeto apuntado por el mouse
+local telekinesisConnections = {} -- Tabla para manejar todas las conexiones de telequinesis
+local lockOnConnection = nil
+local fixedCameraTarget = nil
+local heldObject = nil
+local mouseTarget = nil
+local selectionHighlight = nil -- Highlight de selección
 
 -- Almacenar estado original
 local originalLightingEffects = {}
@@ -54,6 +55,14 @@ local originalMaterials = {}
 local oldGui = CoreGui:FindFirstChild("PhysicalAxisTabsHub")
 if oldGui then
 	oldGui:Destroy()
+end
+
+-- Limpiar cualquier highlight residual
+for _, obj in pairs(Workspace:GetDescendants()) do
+	local highlight = obj:FindFirstChild("TelekinesisHighlight")
+	if highlight then
+		highlight:Destroy()
+	end
 end
 
 -- ==================== FUNCIONES PRINCIPALES ====================
@@ -298,35 +307,52 @@ local function spyOnPlayer(player)
 	end
 end
 
--- NUEVO: Fijar cámara en un jugador (siempre mirándolo)
+-- CORREGIDO: Lock-on solo de cámara (sin afectar el movimiento)
 local function fixCameraOnPlayer(player)
 	if not player or not player.Character then return end
 	
+	-- Detener cualquier lock-on anterior
+	if lockOnConnection then
+		lockOnConnection:Disconnect()
+		lockOnConnection = nil
+	end
+	
 	fixedCameraTarget = player
 	
-	-- Iniciar bucle para mantener la cámara fija
-	RunService.RenderStepped:Connect(function()
+	lockOnConnection = RunService.RenderStepped:Connect(function()
 		if not fixedCameraTarget or not fixedCameraTarget.Character then
+			-- El objetivo ya no existe, detener lock-on
+			if lockOnConnection then
+				lockOnConnection:Disconnect()
+				lockOnConnection = nil
+			end
 			fixedCameraTarget = nil
 			return
 		end
 		
 		local targetRoot = fixedCameraTarget.Character:FindFirstChild("HumanoidRootPart")
-		local localChar = LocalPlayer.Character
-		if not targetRoot or not localChar then return end
-		
-		local localRoot = localChar:FindFirstChild("HumanoidRootPart")
-		if localRoot then
-			-- Posicionar cámara detrás del jugador local mirando al objetivo
-			local cameraPosition = localRoot.CFrame.Position + Vector3.new(0, 5, -10)
-			Camera.CFrame = CFrame.new(cameraPosition, targetRoot.Position)
+		if not targetRoot then
+			-- El objetivo perdió su root part
+			if lockOnConnection then
+				lockOnConnection:Disconnect()
+				lockOnConnection = nil
+			end
+			fixedCameraTarget = nil
+			return
 		end
+		
+		-- Solo rotar la cámara hacia el objetivo, sin modificar el personaje
+		local cameraPos = Camera.CFrame.Position
+		local lookAt = targetRoot.Position
+		
+		-- Mantener la posición actual de la cámara pero mirar hacia el objetivo
+		Camera.CFrame = CFrame.new(cameraPos, lookAt)
 	end)
 	
 	pcall(function()
 		StarterGui:SetCore("SendNotification", {
 			Title = "Cámara Fijada",
-			Text = "Cámara fijada en " .. player.Name,
+			Text = "Cámara siguiendo a " .. player.Name,
 			Duration = 2
 		})
 	end)
@@ -335,6 +361,12 @@ end
 local function stopSpying()
 	isCameraSpyEnabled = false
 	fixedCameraTarget = nil
+	
+	-- Detener lock-on
+	if lockOnConnection then
+		lockOnConnection:Disconnect()
+		lockOnConnection = nil
+	end
 	
 	local char = LocalPlayer.Character
 	if char then
@@ -345,39 +377,74 @@ local function stopSpying()
 	end
 end
 
--- ==================== SISTEMA DE TELEQUINESIS ====================
+-- ==================== SISTEMA DE TELEQUINESIS CORREGIDO ====================
 
-local function startTelekinesis()
-	if telekinesisConnection then
-		telekinesisConnection:Disconnect()
+local function cleanupTelekinesis()
+	-- Destruir highlight de selección
+	if selectionHighlight then
+		selectionHighlight:Destroy()
+		selectionHighlight = nil
 	end
 	
-	local mouse = LocalPlayer:GetMouse()
+	-- Soltar objeto sostenido
+	if heldObject and heldObject.Parent then
+		if heldObject:IsA("BasePart") then
+			heldObject.Anchored = false
+		end
+	end
+	heldObject = nil
+	mouseTarget = nil
 	
-	-- Crear herramienta de telequinesis
-	local tkTool = Instance.new("Tool")
-	tkTool.Name = "Telekinesis"
-	tkTool.RequiresHandle = false
-	tkTool.Parent = LocalPlayer.Backpack
+	-- Desconectar todas las conexiones
+	for _, conn in pairs(telekinesisConnections) do
+		if conn then
+			conn:Disconnect()
+		end
+	end
+	telekinesisConnections = {}
 	
-	-- Efecto visual de selección
-	local selectionHighlight = Instance.new("Highlight")
+	-- Eliminar herramienta de telequinesis
+	if LocalPlayer.Backpack then
+		local tkTool = LocalPlayer.Backpack:FindFirstChild("Telekinesis")
+		if tkTool then
+			tkTool:Destroy()
+		end
+	end
+	
+	-- También buscar en el personaje
+	if LocalPlayer.Character then
+		local tkTool = LocalPlayer.Character:FindFirstChild("Telekinesis")
+		if tkTool then
+			tkTool:Destroy()
+		end
+	end
+end
+
+local function startTelekinesis()
+	-- Limpiar cualquier instancia anterior
+	cleanupTelekinesis()
+	
+	isTelekinesisEnabled = true
+	
+	-- Crear highlight de selección
+	selectionHighlight = Instance.new("Highlight")
+	selectionHighlight.Name = "TelekinesisHighlight"
 	selectionHighlight.FillColor = Color3.fromRGB(0, 200, 255)
 	selectionHighlight.FillTransparency = 0.7
 	selectionHighlight.OutlineColor = Color3.fromRGB(0, 150, 255)
 	selectionHighlight.OutlineTransparency = 0
 	
-	-- Variables para el arrastre
+	local mouse = LocalPlayer:GetMouse()
 	local draggingObject = false
 	local targetObject = nil
 	local holdDistance = 15
 	
 	-- Detectar objetos al mover el mouse
-	mouse.Move:Connect(function()
+	local mouseMoveConnection = mouse.Move:Connect(function()
 		if not isTelekinesisEnabled then return end
 		
 		local target = mouse.Target
-		if target and target:IsA("BasePart") and target.Parent ~= LocalPlayer.Character then
+		if target and target:IsA("BasePart") and target.Parent ~= LocalPlayer.Character and not target:IsDescendantOf(LocalPlayer.Character or Instance.new("Model")) then
 			selectionHighlight.Parent = target
 			mouseTarget = target
 		else
@@ -386,8 +453,16 @@ local function startTelekinesis()
 		end
 	end)
 	
-	-- Activar al hacer clic
-	tkTool.Activated:Connect(function()
+	table.insert(telekinesisConnections, mouseMoveConnection)
+	
+	-- Crear herramienta de telequinesis
+	local tkTool = Instance.new("Tool")
+	tkTool.Name = "Telekinesis"
+	tkTool.RequiresHandle = false
+	tkTool.Parent = LocalPlayer.Backpack
+	
+	-- Activar al hacer clic (tanto en PC como en móvil)
+	local toolActivatedConnection = tkTool.Activated:Connect(function()
 		if not isTelekinesisEnabled then return end
 		
 		if not draggingObject and mouseTarget then
@@ -395,7 +470,7 @@ local function startTelekinesis()
 			draggingObject = true
 			targetObject = mouseTarget
 			
-			-- Hacer el objeto sin gravedad y anclarlo
+			-- Hacer el objeto sin gravedad
 			if targetObject:IsA("BasePart") then
 				targetObject.Anchored = true
 			end
@@ -405,23 +480,33 @@ local function startTelekinesis()
 			pcall(function()
 				StarterGui:SetCore("SendNotification", {
 					Title = "Telekinesis",
-					Text = "Objeto agarrado: " .. targetObject.Name,
-					Duration = 1
+					Text = "Objeto agarrado: " .. targetObject.Name .. " (toca de nuevo para soltar)",
+					Duration = 2
 				})
 			end)
-		else
+		elseif draggingObject and heldObject then
 			-- Soltar el objeto
-			if heldObject and heldObject:IsA("BasePart") then
+			if heldObject:IsA("BasePart") and heldObject.Parent then
 				heldObject.Anchored = false
 			end
 			draggingObject = false
 			heldObject = nil
 			targetObject = nil
+			
+			pcall(function()
+				StarterGui:SetCore("SendNotification", {
+					Title = "Telekinesis",
+					Text = "Objeto soltado",
+					Duration = 1
+				})
+			end)
 		end
 	end)
 	
-	-- Bucle para mover el objeto con el mouse
-	telekinesisConnection = RunService.RenderStepped:Connect(function()
+	table.insert(telekinesisConnections, toolActivatedConnection)
+	
+	-- Bucle para mover el objeto con la posición del mouse/touch
+	local renderConnection = RunService.RenderStepped:Connect(function()
 		if not isTelekinesisEnabled then return end
 		
 		if draggingObject and heldObject and heldObject.Parent then
@@ -429,22 +514,23 @@ local function startTelekinesis()
 			if character then
 				local root = character:FindFirstChild("HumanoidRootPart")
 				if root then
-					-- Posicionar el objeto frente al jugador
 					local mouseHit = mouse.Hit
 					if mouseHit then
+						-- Calcular posición frente al jugador basado en dónde apunta
 						local direction = (mouseHit.Position - root.Position).Unit
 						local targetPosition = root.Position + direction * holdDistance
 						
 						-- Mover suavemente el objeto
-						heldObject.Position = heldObject.Position:Lerp(targetPosition, 0.3)
+						heldObject.Position = heldObject.Position:Lerp(targetPosition + Vector3.new(0, 2, 0), 0.3)
 						
-						-- Rotar el objeto para que mire hacia el jugador
-						heldObject.CFrame = CFrame.new(heldObject.Position, root.Position)
+						-- Hacer que el objeto mire hacia el jugador
+						local lookAtPos = root.Position
+						heldObject.CFrame = CFrame.new(heldObject.Position, lookAtPos)
 					end
 				end
 			end
-		elseif heldObject and not draggingObject then
-			-- Si soltó el objeto pero sigue existiendo
+		elseif heldObject and not draggingObject and heldObject.Parent then
+			-- Si el objeto aún existe pero no se está arrastrando
 			if heldObject:IsA("BasePart") then
 				heldObject.Anchored = false
 			end
@@ -452,31 +538,12 @@ local function startTelekinesis()
 		end
 	end)
 	
-	return tkTool
+	table.insert(telekinesisConnections, renderConnection)
 end
 
 local function stopTelekinesis()
 	isTelekinesisEnabled = false
-	
-	if heldObject and heldObject:IsA("BasePart") then
-		heldObject.Anchored = false
-	end
-	
-	if telekinesisConnection then
-		telekinesisConnection:Disconnect()
-		telekinesisConnection = nil
-	end
-	
-	heldObject = nil
-	
-	-- Eliminar herramienta de telequinesis
-	local backpack = LocalPlayer.Backpack
-	if backpack then
-		local tkTool = backpack:FindFirstChild("Telekinesis")
-		if tkTool then
-			tkTool:Destroy()
-		end
-	end
+	cleanupTelekinesis()
 end
 
 -- ==================== FUNCIONES DE UTILIDADES ====================
@@ -834,7 +901,6 @@ tabExtras.ScrollBarThickness = 0
 tabExtras.Visible = false
 tabExtras.Parent = mainFrame
 
--- Pestaña de Jugadores
 local tabPlayers = Instance.new("ScrollingFrame")
 tabPlayers.Position = UDim2.new(0, 125, 0, 45)
 tabPlayers.Size = UDim2.new(1, -130, 1, -50)
@@ -978,7 +1044,7 @@ local function createSimpleButton(parent, text, yPosition, color, callback)
 	return button
 end
 
--- ==================== SISTEMA DE LISTA DE JUGADORES MEJORADO ====================
+-- ==================== SISTEMA DE LISTA DE JUGADORES ====================
 
 local playerListFrame = Instance.new("Frame")
 playerListFrame.Size = UDim2.new(1, 0, 0, 0)
@@ -1007,13 +1073,11 @@ local function createPlayerEntry(player, yPosition)
 	avatarCorner.CornerRadius = UDim.new(0, 22)
 	avatarCorner.Parent = avatarImage
 	
-	-- Borde del avatar
 	local avatarStroke = Instance.new("UIStroke")
 	avatarStroke.Color = Color3.fromRGB(150, 120, 255)
 	avatarStroke.Thickness = 1
 	avatarStroke.Parent = avatarImage
 	
-	-- Cargar avatar
 	local userId = player.UserId
 	local thumbType = Enum.ThumbnailType.HeadShot
 	local thumbSize = Enum.ThumbnailSize.Size48x48
@@ -1024,7 +1088,6 @@ local function createPlayerEntry(player, yPosition)
 		avatarImage.Image = "rbxasset://textures/ui/GuiImagePlaceholder.png"
 	end
 	
-	-- Nombre del jugador
 	local nameLabel = Instance.new("TextLabel")
 	nameLabel.Size = UDim2.new(0, 100, 0, 20)
 	nameLabel.Position = UDim2.new(0.22, 0, 0.05, 0)
@@ -1037,7 +1100,6 @@ local function createPlayerEntry(player, yPosition)
 	nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
 	nameLabel.Parent = entryFrame
 	
-	-- DisplayName
 	if player.DisplayName ~= player.Name then
 		local displayLabel = Instance.new("TextLabel")
 		displayLabel.Size = UDim2.new(0, 100, 0, 16)
@@ -1052,7 +1114,6 @@ local function createPlayerEntry(player, yPosition)
 		displayLabel.Parent = entryFrame
 	end
 	
-	-- Botones de acción
 	local buttonsY = 0.55
 	
 	-- Botón de Espiar
@@ -1091,7 +1152,7 @@ local function createPlayerEntry(player, yPosition)
 		teleportToPlayer(player)
 	end)
 	
-	-- NUEVO: Botón de Fijar Cámara
+	-- Botón de Fijar Cámara
 	local fixButton = Instance.new("TextButton")
 	fixButton.Size = UDim2.new(0, 45, 0, 22)
 	fixButton.Position = UDim2.new(0.89, 0, buttonsY, 0)
@@ -1113,12 +1174,10 @@ local function createPlayerEntry(player, yPosition)
 end
 
 local function updatePlayerList()
-	-- Limpiar lista anterior
 	for _, child in pairs(playerListFrame:GetChildren()) do
 		child:Destroy()
 	end
 	
-	-- Obtener jugadores
 	local players = {}
 	for _, player in pairs(Players:GetPlayers()) do
 		if player ~= LocalPlayer then
@@ -1126,14 +1185,12 @@ local function updatePlayerList()
 		end
 	end
 	
-	-- Crear entradas
 	local yPos = 0
 	for _, player in pairs(players) do
 		createPlayerEntry(player, yPos)
 		yPos = yPos + 75
 	end
 	
-	-- Mensaje si no hay jugadores
 	if #players == 0 then
 		local noPlayersLabel = Instance.new("TextLabel")
 		noPlayersLabel.Size = UDim2.new(1, -10, 0, 40)
@@ -1149,7 +1206,7 @@ local function updatePlayerList()
 	tabPlayers.CanvasSize = UDim2.new(0, 0, 0, math.max(75 * #players, 100))
 end
 
--- Botones de control en la pestaña de jugadores
+-- Botones de control
 local stopSpyButton = createSimpleButton(tabPlayers, "🛑 Dejar de Espiar", 0, Color3.fromRGB(180, 50, 50), function()
 	stopSpying()
 end)
@@ -1165,10 +1222,8 @@ local refreshListButton = createSimpleButton(tabPlayers, "🔄 Actualizar Lista"
 	end)
 end)
 
--- Mover la lista debajo de los botones
 playerListFrame.Position = UDim2.new(0, 0, 0, 85)
 
--- Título de la lista
 local listTitleLabel = Instance.new("TextLabel")
 listTitleLabel.Size = UDim2.new(1, -10, 0, 20)
 listTitleLabel.Position = UDim2.new(0.02, 0, 0, 0)
@@ -1274,7 +1329,7 @@ tpButton.MouseButton1Click:Connect(function()
 	toggleTeleportTool(isClickTeleportEnabled)
 end)
 
--- NUEVO: Botón de Telequinesis
+-- Botón de Telequinesis CORREGIDO
 local tkButton = createSimpleButton(tabExtras, "Telekinesis: APAGADO", 84, nil, nil)
 
 tkButton.MouseButton1Click:Connect(function()
@@ -1381,9 +1436,13 @@ LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
 _G.AutoRejoinEnabled = false
 _G.RejoinConnected = false
 
--- Inicializar lista de jugadores
 updatePlayerList()
 
-print("PhysicalAxis Hub - Versión Final Completa cargado correctamente")
-print("Pestañas: Físicas | Extras | Jugadores 👤 | Utilidades")
-print("Nuevas funciones: Botón actualizar lista, Fijar cámara, Telekinesis")
+-- Limpiar telequinesis al cerrar el script
+screenGui.Destroying:Connect(function()
+	stopTelekinesis()
+	stopSpying()
+end)
+
+print("PhysicalAxis Hub - Versión Final Corregida cargado correctamente")
+print("Correcciones: Telekinesis funcional, Lock-on solo de cámara, sin atravesar paredes")
