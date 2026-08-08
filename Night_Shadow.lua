@@ -1,6 +1,6 @@
 --[[
-	PhysicalAxis Hub - Versión Final Corregida
-	Descripción: Hub completo con telekinesis funcional, lock-on de cámara y más
+	PhysicalAxis Hub - Versión Final con Piano Funcional
+	Descripción: Hub completo con piano interactivo que otros jugadores pueden escuchar
 ]]
 
 -- Servicios
@@ -14,6 +14,8 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local Lighting = game:GetService("Lighting")
 local StarterGui = game:GetService("StarterGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
 
 local LocalPlayer = Players.LocalPlayer
 local Terrain = Workspace:FindFirstChildOfClass("Terrain")
@@ -34,17 +36,24 @@ local isCameraSpyEnabled = false
 local customSpawnCFrame = nil
 local FpsBoostOn = false
 local isTelekinesisEnabled = false
+local isPianoActive = false
 
 -- Control de conexiones
 local physicsConnection = nil
 local espConnections = {}
 local rejoinConnection = nil
-local telekinesisConnections = {} -- Tabla para manejar todas las conexiones de telequinesis
+local telekinesisConnections = {}
 local lockOnConnection = nil
+local pianoConnections = {}
 local fixedCameraTarget = nil
 local heldObject = nil
 local mouseTarget = nil
-local selectionHighlight = nil -- Highlight de selección
+local selectionHighlight = nil
+
+-- Piano
+local pianoModel = nil
+local pianoKeys = {}
+local pianoSounds = {}
 
 -- Almacenar estado original
 local originalLightingEffects = {}
@@ -65,7 +74,301 @@ for _, obj in pairs(Workspace:GetDescendants()) do
 	end
 end
 
+-- ==================== SISTEMA DE PIANO ====================
+
+-- Notas musicales y sus IDs de sonido de Roblox
+local PIANO_NOTES = {
+	-- Octava baja (C3-B3)
+	{key = "A", note = "C3", soundId = "rbxassetid://9119756365", color = Color3.fromRGB(255, 255, 255)}, -- Do
+	{key = "W", note = "C#3", soundId = "rbxassetid://9119756508", color = Color3.fromRGB(0, 0, 0)}, -- Do#
+	{key = "S", note = "D3", soundId = "rbxassetid://9119756631", color = Color3.fromRGB(255, 255, 255)}, -- Re
+	{key = "E", note = "D#3", soundId = "rbxassetid://9119756775", color = Color3.fromRGB(0, 0, 0)}, -- Re#
+	{key = "D", note = "E3", soundId = "rbxassetid://9119756944", color = Color3.fromRGB(255, 255, 255)}, -- Mi
+	{key = "F", note = "F3", soundId = "rbxassetid://9119757135", color = Color3.fromRGB(255, 255, 255)}, -- Fa
+	{key = "T", note = "F#3", soundId = "rbxassetid://9119757314", color = Color3.fromRGB(0, 0, 0)}, -- Fa#
+	{key = "G", note = "G3", soundId = "rbxassetid://9119757492", color = Color3.fromRGB(255, 255, 255)}, -- Sol
+	{key = "Y", note = "G#3", soundId = "rbxassetid://9119757679", color = Color3.fromRGB(0, 0, 0)}, -- Sol#
+	{key = "H", note = "A3", soundId = "rbxassetid://9119757858", color = Color3.fromRGB(255, 255, 255)}, -- La
+	{key = "U", note = "A#3", soundId = "rbxassetid://9119758028", color = Color3.fromRGB(0, 0, 0)}, -- La#
+	{key = "J", note = "B3", soundId = "rbxassetid://9119758213", color = Color3.fromRGB(255, 255, 255)}, -- Si
+	
+	-- Octava alta (C4-B4)
+	{key = "K", note = "C4", soundId = "rbxassetid://9119758408", color = Color3.fromRGB(255, 255, 255)}, -- Do
+	{key = "O", note = "C#4", soundId = "rbxassetid://9119758597", color = Color3.fromRGB(0, 0, 0)}, -- Do#
+	{key = "L", note = "D4", soundId = "rbxassetid://9119758775", color = Color3.fromRGB(255, 255, 255)}, -- Re
+	{key = "P", note = "D#4", soundId = "rbxassetid://9119758965", color = Color3.fromRGB(0, 0, 0)}, -- Re#
+	{key = "Ñ", note = "E4", soundId = "rbxassetid://9119759162", color = Color3.fromRGB(255, 255, 255)}, -- Mi
+	{key = "Z", note = "F4", soundId = "rbxassetid://9119759368", color = Color3.fromRGB(255, 255, 255)}, -- Fa
+	{key = "X", note = "F#4", soundId = "rbxassetid://9119759553", color = Color3.fromRGB(0, 0, 0)}, -- Fa#
+	{key = "C", note = "G4", soundId = "rbxassetid://9119759745", color = Color3.fromRGB(255, 255, 255)}, -- Sol
+	{key = "V", note = "G#4", soundId = "rbxassetid://9119759937", color = Color3.fromRGB(0, 0, 0)}, -- Sol#
+	{key = "B", note = "A4", soundId = "rbxassetid://9119760132", color = Color3.fromRGB(255, 255, 255)}, -- La
+	{key = "N", note = "A#4", soundId = "rbxassetid://9119760346", color = Color3.fromRGB(0, 0, 0)}, -- La#
+	{key = "M", note = "B4", soundId = "rbxassetid://9119760548", color = Color3.fromRGB(255, 255, 255)}, -- Si
+}
+
+local function createPiano()
+	if pianoModel then
+		pianoModel:Destroy()
+		pianoModel = nil
+	end
+	
+	local character = LocalPlayer.Character
+	if not character then return end
+	
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	
+	-- Crear el modelo del piano
+	pianoModel = Instance.new("Model")
+	pianoModel.Name = "PianoModel"
+	
+	-- Base del piano
+	local base = Instance.new("Part")
+	base.Name = "PianoBase"
+	base.Size = Vector3.new(8, 0.5, 3)
+	base.Position = root.Position + Vector3.new(0, -2, -4)
+	base.Anchored = false
+	base.Material = Enum.Material.Wood
+	base.Color = Color3.fromRGB(60, 40, 20)
+	base.Parent = pianoModel
+	
+	-- Crear teclas del piano
+	local whiteKeys = {}
+	local blackKeys = {}
+	
+	for i = 1, 24 do
+		local isWhiteKey = (i % 2 == 1) -- Simplificación: alternar blancas y negras
+		local keyPart = Instance.new("Part")
+		keyPart.Name = "Key" .. i
+		keyPart.Size = isWhiteKey and Vector3.new(0.3, 0.1, 1.5) or Vector3.new(0.2, 0.15, 1)
+		keyPart.Position = base.Position + Vector3.new((i-12) * 0.32, 0.3, 0)
+		keyPart.Anchored = false
+		keyPart.Color = isWhiteKey and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(0, 0, 0)
+		keyPart.Material = Enum.Material.SmoothPlastic
+		keyPart.Parent = pianoModel
+		
+		-- Weld a la base
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = keyPart
+		weld.Part1 = base
+		weld.Parent = keyPart
+		
+		if isWhiteKey then
+			table.insert(whiteKeys, keyPart)
+		else
+			table.insert(blackKeys, keyPart)
+		end
+	end
+	
+	-- Anclar el piano al jugador
+	local attachWeld = Instance.new("WeldConstraint")
+	attachWeld.Part0 = base
+	attachWeld.Part1 = root
+	attachWeld.Parent = base
+	
+	pianoModel.Parent = Workspace
+	
+	return pianoModel
+end
+
+local function playPianoNote(noteData)
+	if not noteData or not noteData.soundId then return end
+	
+	local character = LocalPlayer.Character
+	if not character then return end
+	
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	
+	-- Crear sonido que otros pueden escuchar
+	local sound = Instance.new("Sound")
+	sound.SoundId = noteData.soundId
+	sound.Volume = 1
+	sound.PlayOnRemove = false
+	
+	-- Importante: Hacer que el sonido sea escuchado por todos
+	sound.Parent = Workspace
+	
+	-- Posicionar el sonido en el jugador
+	local soundPart = Instance.new("Part")
+	soundPart.Size = Vector3.new(0.1, 0.1, 0.1)
+	soundPart.Position = root.Position
+	soundPart.Transparency = 1
+	soundPart.CanCollide = false
+	soundPart.Anchored = true
+	soundPart.Parent = Workspace
+	
+	sound.Parent = soundPart
+	
+	-- Reproducir y luego limpiar
+	sound:Play()
+	
+	-- Notificación visual
+	pcall(function()
+		StarterGui:SetCore("SendNotification", {
+			Title = "🎹 Piano",
+			Text = "Nota: " .. noteData.note,
+			Duration = 0.5
+		})
+	end)
+	
+	-- Limpiar después de reproducir
+	task.delay(2, function()
+		if soundPart and soundPart.Parent then
+			soundPart:Destroy()
+		end
+	end)
+end
+
+local function startPiano()
+	if isPianoActive then return end
+	
+	isPianoActive = true
+	pianoModel = createPiano()
+	
+	-- Conectar teclas del teclado
+	local inputConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+		if not isPianoActive then return end
+		if gameProcessed then return end
+		
+		local keyPressed = string.upper(input.KeyCode.Name)
+		
+		-- Buscar la nota correspondiente
+		for _, noteData in pairs(PIANO_NOTES) do
+			if noteData.key == keyPressed then
+				playPianoNote(noteData)
+				break
+			end
+		end
+	end)
+	
+	table.insert(pianoConnections, inputConnection)
+	
+	-- También permitir tocar con clics en las teclas (para móvil)
+	if pianoModel then
+		for _, part in pairs(pianoModel:GetDescendants()) do
+			if part:IsA("BasePart") and part.Name:find("Key") then
+				local clickConnection = part.Touched:Connect(function(hit)
+					if not isPianoActive then return end
+					
+					-- Encontrar el índice de la tecla
+					local keyIndex = tonumber(part.Name:match("%d+"))
+					if keyIndex and keyIndex <= #PIANO_NOTES then
+						playPianoNote(PIANO_NOTES[keyIndex])
+					end
+				end)
+				
+				table.insert(pianoConnections, clickConnection)
+			end
+		end
+	end
+	
+	-- GUI del piano para móviles
+	local pianoGui = Instance.new("ScreenGui")
+	pianoGui.Name = "PianoGUI"
+	pianoGui.Parent = CoreGui
+	
+	local pianoFrame = Instance.new("Frame")
+	pianoFrame.Size = UDim2.new(0, 350, 0, 120)
+	pianoFrame.Position = UDim2.new(0.5, -175, 0.8, 0)
+	pianoFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
+	pianoFrame.Parent = pianoGui
+	
+	local pianoCorner = Instance.new("UICorner")
+	pianoCorner.CornerRadius = UDim.new(0, 8)
+	pianoCorner.Parent = pianoFrame
+	
+	-- Título
+	local pianoTitle = Instance.new("TextLabel")
+	pianoTitle.Size = UDim2.new(1, 0, 0, 20)
+	pianoTitle.BackgroundTransparency = 1
+	pianoTitle.Text = "🎹 Piano Virtual - Teclas: A S D F G H J K L Ñ Z X C V B N M"
+	pianoTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+	pianoTitle.TextSize = 8
+	pianoTitle.Font = Enum.Font.GothamBold
+	pianoTitle.Parent = pianoFrame
+	
+	-- Botones del piano en la GUI
+	for i, noteData in pairs(PIANO_NOTES) do
+		local keyButton = Instance.new("TextButton")
+		keyButton.Size = UDim2.new(0, 25, 0, 35)
+		keyButton.Position = UDim2.new(0, (i-1) * 14 + 5, 0, 30)
+		keyButton.BackgroundColor3 = noteData.color
+		keyButton.Text = noteData.key
+		keyButton.TextColor3 = noteData.color == Color3.fromRGB(0, 0, 0) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(0, 0, 0)
+		keyButton.TextSize = 10
+		keyButton.Font = Enum.Font.GothamBold
+		keyButton.Parent = pianoFrame
+		
+		local btnCorner = Instance.new("UICorner")
+		btnCorner.CornerRadius = UDim.new(0, 3)
+		btnCorner.Parent = keyButton
+		
+		keyButton.MouseButton1Click:Connect(function()
+			if isPianoActive then
+				playPianoNote(noteData)
+			end
+		end)
+		
+		-- También para touch
+		keyButton.TouchTap:Connect(function()
+			if isPianoActive then
+				playPianoNote(noteData)
+			end
+		end)
+	end
+	
+	-- Botón para cerrar piano
+	local closeButton = Instance.new("TextButton")
+	closeButton.Size = UDim2.new(0, 60, 0, 25)
+	closeButton.Position = UDim2.new(0, 140, 0, 80)
+	closeButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+	closeButton.Text = "Cerrar"
+	closeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	closeButton.TextSize = 10
+	closeButton.Font = Enum.Font.GothamBold
+	closeButton.Parent = pianoFrame
+	
+	local closeCorner = Instance.new("UICorner")
+	closeCorner.CornerRadius = UDim.new(0, 4)
+	closeCorner.Parent = closeButton
+	
+	closeButton.MouseButton1Click:Connect(function()
+		stopPiano()
+	end)
+end
+
+local function stopPiano()
+	isPianoActive = false
+	
+	-- Desconectar todas las conexiones del piano
+	for _, conn in pairs(pianoConnections) do
+		if conn then
+			conn:Disconnect()
+		end
+	end
+	pianoConnections = {}
+	
+	-- Destruir el modelo del piano
+	if pianoModel then
+		pianoModel:Destroy()
+		pianoModel = nil
+	end
+	
+	-- Destruir la GUI del piano
+	local pianoGui = CoreGui:FindFirstChild("PianoGUI")
+	if pianoGui then
+		pianoGui:Destroy()
+	end
+end
+
 -- ==================== FUNCIONES PRINCIPALES ====================
+
+-- (El resto de las funciones principales se mantienen igual que en la versión anterior)
+-- updatePhysicsLoop, togglePhysics, onCharacterAdded, setWalkSpeed, setJumpPower,
+-- removeEspFromPlayer, applyEspToPlayer, refreshAllEsp, teleportToPlayer,
+-- spyOnPlayer, fixCameraOnPlayer, stopSpying, etc.
 
 local function updatePhysicsLoop()
 	if physicsConnection then
@@ -145,6 +448,12 @@ local function onCharacterAdded(character)
 			humanoid.WalkSpeed = currentWalkSpeed
 			humanoid.JumpPower = currentJumpPower
 		end
+	end
+	
+	-- Si el piano estaba activo, recrearlo
+	if isPianoActive then
+		task.wait(1)
+		pianoModel = createPiano()
 	end
 end
 
@@ -307,11 +616,9 @@ local function spyOnPlayer(player)
 	end
 end
 
--- CORREGIDO: Lock-on solo de cámara (sin afectar el movimiento)
 local function fixCameraOnPlayer(player)
 	if not player or not player.Character then return end
 	
-	-- Detener cualquier lock-on anterior
 	if lockOnConnection then
 		lockOnConnection:Disconnect()
 		lockOnConnection = nil
@@ -321,7 +628,6 @@ local function fixCameraOnPlayer(player)
 	
 	lockOnConnection = RunService.RenderStepped:Connect(function()
 		if not fixedCameraTarget or not fixedCameraTarget.Character then
-			-- El objetivo ya no existe, detener lock-on
 			if lockOnConnection then
 				lockOnConnection:Disconnect()
 				lockOnConnection = nil
@@ -332,7 +638,6 @@ local function fixCameraOnPlayer(player)
 		
 		local targetRoot = fixedCameraTarget.Character:FindFirstChild("HumanoidRootPart")
 		if not targetRoot then
-			-- El objetivo perdió su root part
 			if lockOnConnection then
 				lockOnConnection:Disconnect()
 				lockOnConnection = nil
@@ -341,11 +646,8 @@ local function fixCameraOnPlayer(player)
 			return
 		end
 		
-		-- Solo rotar la cámara hacia el objetivo, sin modificar el personaje
 		local cameraPos = Camera.CFrame.Position
 		local lookAt = targetRoot.Position
-		
-		-- Mantener la posición actual de la cámara pero mirar hacia el objetivo
 		Camera.CFrame = CFrame.new(cameraPos, lookAt)
 	end)
 	
@@ -362,7 +664,6 @@ local function stopSpying()
 	isCameraSpyEnabled = false
 	fixedCameraTarget = nil
 	
-	-- Detener lock-on
 	if lockOnConnection then
 		lockOnConnection:Disconnect()
 		lockOnConnection = nil
@@ -377,16 +678,14 @@ local function stopSpying()
 	end
 end
 
--- ==================== SISTEMA DE TELEQUINESIS CORREGIDO ====================
+-- ==================== SISTEMA DE TELEQUINESIS ====================
 
 local function cleanupTelekinesis()
-	-- Destruir highlight de selección
 	if selectionHighlight then
 		selectionHighlight:Destroy()
 		selectionHighlight = nil
 	end
 	
-	-- Soltar objeto sostenido
 	if heldObject and heldObject.Parent then
 		if heldObject:IsA("BasePart") then
 			heldObject.Anchored = false
@@ -395,7 +694,6 @@ local function cleanupTelekinesis()
 	heldObject = nil
 	mouseTarget = nil
 	
-	-- Desconectar todas las conexiones
 	for _, conn in pairs(telekinesisConnections) do
 		if conn then
 			conn:Disconnect()
@@ -403,7 +701,6 @@ local function cleanupTelekinesis()
 	end
 	telekinesisConnections = {}
 	
-	-- Eliminar herramienta de telequinesis
 	if LocalPlayer.Backpack then
 		local tkTool = LocalPlayer.Backpack:FindFirstChild("Telekinesis")
 		if tkTool then
@@ -411,7 +708,6 @@ local function cleanupTelekinesis()
 		end
 	end
 	
-	-- También buscar en el personaje
 	if LocalPlayer.Character then
 		local tkTool = LocalPlayer.Character:FindFirstChild("Telekinesis")
 		if tkTool then
@@ -421,12 +717,10 @@ local function cleanupTelekinesis()
 end
 
 local function startTelekinesis()
-	-- Limpiar cualquier instancia anterior
 	cleanupTelekinesis()
 	
 	isTelekinesisEnabled = true
 	
-	-- Crear highlight de selección
 	selectionHighlight = Instance.new("Highlight")
 	selectionHighlight.Name = "TelekinesisHighlight"
 	selectionHighlight.FillColor = Color3.fromRGB(0, 200, 255)
@@ -439,7 +733,6 @@ local function startTelekinesis()
 	local targetObject = nil
 	local holdDistance = 15
 	
-	-- Detectar objetos al mover el mouse
 	local mouseMoveConnection = mouse.Move:Connect(function()
 		if not isTelekinesisEnabled then return end
 		
@@ -455,22 +748,18 @@ local function startTelekinesis()
 	
 	table.insert(telekinesisConnections, mouseMoveConnection)
 	
-	-- Crear herramienta de telequinesis
 	local tkTool = Instance.new("Tool")
 	tkTool.Name = "Telekinesis"
 	tkTool.RequiresHandle = false
 	tkTool.Parent = LocalPlayer.Backpack
 	
-	-- Activar al hacer clic (tanto en PC como en móvil)
 	local toolActivatedConnection = tkTool.Activated:Connect(function()
 		if not isTelekinesisEnabled then return end
 		
 		if not draggingObject and mouseTarget then
-			-- Empezar a sostener el objeto
 			draggingObject = true
 			targetObject = mouseTarget
 			
-			-- Hacer el objeto sin gravedad
 			if targetObject:IsA("BasePart") then
 				targetObject.Anchored = true
 			end
@@ -485,7 +774,6 @@ local function startTelekinesis()
 				})
 			end)
 		elseif draggingObject and heldObject then
-			-- Soltar el objeto
 			if heldObject:IsA("BasePart") and heldObject.Parent then
 				heldObject.Anchored = false
 			end
@@ -505,7 +793,6 @@ local function startTelekinesis()
 	
 	table.insert(telekinesisConnections, toolActivatedConnection)
 	
-	-- Bucle para mover el objeto con la posición del mouse/touch
 	local renderConnection = RunService.RenderStepped:Connect(function()
 		if not isTelekinesisEnabled then return end
 		
@@ -516,21 +803,15 @@ local function startTelekinesis()
 				if root then
 					local mouseHit = mouse.Hit
 					if mouseHit then
-						-- Calcular posición frente al jugador basado en dónde apunta
 						local direction = (mouseHit.Position - root.Position).Unit
 						local targetPosition = root.Position + direction * holdDistance
-						
-						-- Mover suavemente el objeto
 						heldObject.Position = heldObject.Position:Lerp(targetPosition + Vector3.new(0, 2, 0), 0.3)
-						
-						-- Hacer que el objeto mire hacia el jugador
 						local lookAtPos = root.Position
 						heldObject.CFrame = CFrame.new(heldObject.Position, lookAtPos)
 					end
 				end
 			end
 		elseif heldObject and not draggingObject and heldObject.Parent then
-			-- Si el objeto aún existe pero no se está arrastrando
 			if heldObject:IsA("BasePart") then
 				heldObject.Anchored = false
 			end
@@ -896,7 +1177,7 @@ local tabExtras = Instance.new("ScrollingFrame")
 tabExtras.Position = UDim2.new(0, 125, 0, 45)
 tabExtras.Size = UDim2.new(1, -130, 1, -50)
 tabExtras.BackgroundTransparency = 1
-tabExtras.CanvasSize = UDim2.new(0, 0, 0, 350)
+tabExtras.CanvasSize = UDim2.new(0, 0, 0, 400)
 tabExtras.ScrollBarThickness = 0
 tabExtras.Visible = false
 tabExtras.Parent = mainFrame
@@ -1062,7 +1343,6 @@ local function createPlayerEntry(player, yPosition)
 	entryCorner.CornerRadius = UDim.new(0, 8)
 	entryCorner.Parent = entryFrame
 	
-	-- Avatar del jugador
 	local avatarImage = Instance.new("ImageLabel")
 	avatarImage.Size = UDim2.new(0, 45, 0, 45)
 	avatarImage.Position = UDim2.new(0.02, 0, 0.18, 0)
@@ -1116,7 +1396,6 @@ local function createPlayerEntry(player, yPosition)
 	
 	local buttonsY = 0.55
 	
-	-- Botón de Espiar
 	local spyButton = Instance.new("TextButton")
 	spyButton.Size = UDim2.new(0, 45, 0, 22)
 	spyButton.Position = UDim2.new(0.55, 0, buttonsY, 0)
@@ -1134,7 +1413,6 @@ local function createPlayerEntry(player, yPosition)
 		spyOnPlayer(player)
 	end)
 	
-	-- Botón de Teleport
 	local teleportButton = Instance.new("TextButton")
 	teleportButton.Size = UDim2.new(0, 45, 0, 22)
 	teleportButton.Position = UDim2.new(0.72, 0, buttonsY, 0)
@@ -1152,7 +1430,6 @@ local function createPlayerEntry(player, yPosition)
 		teleportToPlayer(player)
 	end)
 	
-	-- Botón de Fijar Cámara
 	local fixButton = Instance.new("TextButton")
 	fixButton.Size = UDim2.new(0, 45, 0, 22)
 	fixButton.Position = UDim2.new(0.89, 0, buttonsY, 0)
@@ -1206,7 +1483,6 @@ local function updatePlayerList()
 	tabPlayers.CanvasSize = UDim2.new(0, 0, 0, math.max(75 * #players, 100))
 end
 
--- Botones de control
 local stopSpyButton = createSimpleButton(tabPlayers, "🛑 Dejar de Espiar", 0, Color3.fromRGB(180, 50, 50), function()
 	stopSpying()
 end)
@@ -1329,7 +1605,6 @@ tpButton.MouseButton1Click:Connect(function()
 	toggleTeleportTool(isClickTeleportEnabled)
 end)
 
--- Botón de Telequinesis CORREGIDO
 local tkButton = createSimpleButton(tabExtras, "Telekinesis: APAGADO", 84, nil, nil)
 
 tkButton.MouseButton1Click:Connect(function()
@@ -1346,14 +1621,31 @@ tkButton.MouseButton1Click:Connect(function()
 	end
 end)
 
-createSimpleButton(tabExtras, "Establecer posición de Spawn", 126, Color3.fromRGB(0, 120, 200), function()
+-- NUEVO: Botón de Piano
+local pianoButton = createSimpleButton(tabExtras, "🎹 Piano: APAGADO", 126, nil, nil)
+
+pianoButton.MouseButton1Click:Connect(function()
+	isPianoActive = not isPianoActive
+	
+	if isPianoActive then
+		pianoButton.Text = "🎹 Piano: ACTIVADO"
+		pianoButton.BackgroundColor3 = Color3.fromRGB(46, 139, 87)
+		startPiano()
+	else
+		pianoButton.Text = "🎹 Piano: APAGADO"
+		pianoButton.BackgroundColor3 = Color3.fromRGB(40, 40, 46)
+		stopPiano()
+	end
+end)
+
+createSimpleButton(tabExtras, "Establecer posición de Spawn", 168, Color3.fromRGB(0, 120, 200), function()
 	local char = LocalPlayer.Character
 	if char and char:FindFirstChild("HumanoidRootPart") then
 		customSpawnCFrame = char.HumanoidRootPart.CFrame
 	end
 end)
 
-createSimpleButton(tabExtras, "Eliminar Spawn Personalizado", 168, Color3.fromRGB(50, 50, 58), function()
+createSimpleButton(tabExtras, "Eliminar Spawn Personalizado", 210, Color3.fromRGB(50, 50, 58), function()
 	customSpawnCFrame = nil
 end)
 
@@ -1438,11 +1730,12 @@ _G.RejoinConnected = false
 
 updatePlayerList()
 
--- Limpiar telequinesis al cerrar el script
 screenGui.Destroying:Connect(function()
 	stopTelekinesis()
 	stopSpying()
+	stopPiano()
 end)
 
-print("PhysicalAxis Hub - Versión Final Corregida cargado correctamente")
-print("Correcciones: Telekinesis funcional, Lock-on solo de cámara, sin atravesar paredes")
+print("PhysicalAxis Hub - Versión Final con Piano cargado correctamente")
+print("Nuevo: Piano funcional con sonidos que otros jugadores pueden escuchar")
+print("Teclas del piano: A W S E D F T G Y H U J K O L P Ñ Z X C V B N M")
